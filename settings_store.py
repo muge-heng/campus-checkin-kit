@@ -71,12 +71,18 @@ class SettingsStore:
             return DEFAULT_SETTINGS.copy()
 
         try:
-            raw = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            # utf-8-sig：容忍用户用记事本/PowerShell 编辑配置时写入的 BOM
+            raw = json.loads(self.settings_path.read_text(encoding="utf-8-sig"))
             merged = DEFAULT_SETTINGS.copy()
             merged.update(raw)
             merged["pause_ranges"] = self._normalize_pause_ranges(merged.get("pause_ranges", []))
             return merged
         except Exception:
+            try:
+                backup = self.settings_path.with_suffix(".broken.json")
+                backup.write_bytes(self.settings_path.read_bytes())
+            except Exception:
+                pass
             self._save(DEFAULT_SETTINGS.copy())
             return DEFAULT_SETTINGS.copy()
 

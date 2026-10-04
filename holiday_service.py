@@ -45,7 +45,7 @@ class HolidayService:
 
     def _read_cache(self) -> dict:
         try:
-            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            raw = json.loads(self.cache_path.read_text(encoding="utf-8-sig"))
             if isinstance(raw, dict):
                 return raw
         except Exception:
