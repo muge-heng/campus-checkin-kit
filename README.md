@@ -26,8 +26,14 @@
 
 ### 直接运行（推荐普通用户）
 
-到 [Releases](../../releases) 下载 `CampusCheckinKit-vX.Y.Z-windows.zip`，解压后运行
-`CampusCheckinKit/CampusCheckinKit.exe`。请勿只拿走 exe（onedir 模式依赖旁边的 `_internal` 目录）。
+到 [Releases](../../releases) 下载，两种形式任选其一：
+
+| 附件 | 说明 |
+|------|------|
+| `CampusCheckinKit-v1.0.0.exe` | 单文件版，下载后直接双击运行；首次启动需解压到临时目录，启动稍慢，也更容易被杀软误报 |
+| `CampusCheckinKit-v1.0.0-windows.zip` | 目录版（onedir），启动更快、误报更少；解压后运行 `CampusCheckinKit/CampusCheckinKit.exe`，**不能只拿走 exe**（依赖旁边的 `_internal` 目录） |
+
+两者功能完全一致，均未做代码签名；遇到 Windows SmartScreen 提示时选择"仍要运行"。
 
 ### 从源码运行
 
@@ -50,6 +56,14 @@ pyinstaller --noconfirm --clean CampusCheckinKit.spec
 ```
 
 产物在 `dist\CampusCheckinKit\`。默认 onedir + 不压缩 UPX，以降低杀软误报。
+
+如需单文件版：
+
+```powershell
+pyinstaller --noconfirm --clean --onefile --windowed --noupx --name CampusCheckinKit --add-data "assets\today-campus.png;assets" app.py
+```
+
+产物为 `dist\CampusCheckinKit.exe`，可独立分发，但启动更慢、误报风险相对更高。
 
 ## 使用说明
 
