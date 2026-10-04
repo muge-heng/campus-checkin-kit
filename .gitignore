@@ -7,3 +7,5 @@ release/
 preview/
 smoke_test.py
 render_preview.py
+build-onefile/
+dist-onefile/

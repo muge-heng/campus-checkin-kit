@@ -90,14 +90,17 @@ class HolidayService:
         """当天是否为法定节假日休息日（含调休放假；调休补班日返回 False）。"""
         return self.get_day_info(day).is_break
 
-    def keep_alive_break_day(self, day: date, include_weekend: bool) -> bool:
-        """保活智能判断：放假（或可选周末）时无需主动登录校园网。"""
+    def is_workday(self, day: date) -> bool:
+        """当天是否要上课：周末与法定节假日为 False，调休补班日为 True。"""
+        return not self.get_day_info(day).is_break
+
+    def workday_label(self, day: date) -> str:
         info = self.get_day_info(day)
-        if info.kind == TYPE_HOLIDAY:
-            return True
-        if include_weekend and info.is_break:
-            return True
-        return False
+        if info.is_break:
+            return f"休息日（{info.name}）" if info.name else ("周末" if info.kind == TYPE_WEEKEND else "休息日")
+        if info.kind == TYPE_MAKEUP_WORKDAY:
+            return f"调休补班（{info.name}）" if info.name else "调休补班"
+        return "上课日"
 
     def warm_year(self, year: int) -> int:
         """一次性拉取全年节假日表并写入缓存，返回写入条目数。"""

@@ -16,7 +16,13 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from campus_network import KeepAlivePolicy, NetworkLoginConfig, NetworkLoginResult, NetworkLoginService
+from campus_network import (
+    KeepAlivePolicy,
+    NetworkLoginConfig,
+    NetworkLoginResult,
+    NetworkLoginService,
+    NightCutSchedule,
+)
 from holiday_service import HolidayService
 from main_window import MainWindow
 from network_dialog import NetworkLoginDialog
@@ -51,6 +57,7 @@ class ReminderApp:
 
         self.settings = SettingsStore()
         self.holidays = HolidayService(self.settings.cache_dir / "holidays.json")
+        self._rebuild_schedule()
         self.next_retry_at: datetime | None = None
         self.dialog: ReminderDialog | None = None
         self.preview_dialog: ReminderDialog | None = None
@@ -62,6 +69,8 @@ class ReminderApp:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="campus-kit")
         self.network_service = NetworkLoginService()
         self.keep_alive_policy = KeepAlivePolicy()
+        self.night_cut = NightCutSchedule()
+        self._cut_active_last: bool | None = None
         self.network_future: Future | None = None
         self.network_future_kind = ""
         self.last_keep_alive_check_at: datetime | None = None
@@ -376,7 +385,8 @@ class ReminderApp:
         if not cfg.enabled:
             return "未启用自动登录"
         keep_alive = "保活开启" if cfg.keep_alive else "保活关闭"
-        return f"{self.settings.get_last_network_login_status()} | {keep_alive}"
+        cut = "当前处于断网时段" if self._night_cut_active(datetime.now(), cfg) else self.tonight_cut_text()
+        return f"{self.settings.get_last_network_login_status()} | {keep_alive} | {cut}"
 
     def _refresh_network_actions(self) -> None:
         cfg = self._network_config()
@@ -406,7 +416,7 @@ class ReminderApp:
             self.network_dialog.activateWindow()
             return
 
-        dialog = NetworkLoginDialog(self._network_config(), holiday_label=self.holidays.describe(datetime.now().date()))
+        dialog = NetworkLoginDialog(self._network_config(), holiday_label="今晚断网预判：" + self.tonight_cut_text())
         dialog.setWindowIcon(self.app_icon)
         dialog.accepted.connect(lambda: self._save_network_dialog(dialog))
         dialog.login_button.clicked.connect(lambda _checked=False: self._run_network_from_dialog(dialog, "login"))
@@ -440,6 +450,7 @@ class ReminderApp:
     def _save_network_dialog(self, dialog: NetworkLoginDialog) -> None:
         cfg = dialog.get_config()
         self.settings.set_network_login_config(cfg.__dict__)
+        self._rebuild_schedule()
         self.last_keep_alive_check_at = None
         self._refresh_network_actions()
         self.notification_manager.notify_network("校园网登录", "校园网登录配置已保存。", success=True)
@@ -463,6 +474,7 @@ class ReminderApp:
         self._start_network_task(kind, self._network_config())
 
     def on_network_config_saved(self) -> None:
+        self._rebuild_schedule()
         self.last_keep_alive_check_at = None
         self._refresh_status_labels()
 
@@ -471,11 +483,10 @@ class ReminderApp:
             return
         cfg = self._network_config()
         if cfg.enabled and cfg.auto_login and cfg.has_credentials():
-            if cfg.suspend_on_holiday and self.holidays.keep_alive_break_day(
-                datetime.now().date(), include_weekend=False
-            ):
+            now = datetime.now()
+            if self._night_cut_active(now, cfg):
                 self.notification_manager.notify_network(
-                    "校园网保活", "今天是法定节假日，已智能暂停自动登录；可在主菜单手动登录。", success=True
+                    "校园网保活", "当前处于学校安排的夜间断网时段，跳过自动登录；可在主菜单手动登录。", success=True
                 )
                 return
             self._start_network_task("auto-login", cfg)
@@ -485,14 +496,45 @@ class ReminderApp:
             return
         self.session_monitor.poll_for_activity_resume()
         now = datetime.now()
-        if self.keep_alive_policy.resume_daytime_recovery_if_due(now):
+        cfg = self._network_config()
+        cut = self._night_cut_active(now, cfg)
+        if self._cut_active_last is not None and cut != self._cut_active_last:
             self.last_keep_alive_check_at = None
-            self.notification_manager.notify_network(
-                "校园网保活",
-                "夜间暂停已在 07:00 自动解除，恢复网络巡检。",
-                success=True,
-            )
+            if cut:
+                start, end = self.night_cut.current_window(now)
+                self.notification_manager.notify_network(
+                    "校园网保活",
+                    f"进入学校安排的夜间断网时段（{start:%H:%M} 至次日 {end:%H:%M}），保活暂停。",
+                    success=True,
+                )
+            else:
+                self.keep_alive_policy.on_success()
+                self.notification_manager.notify_network("校园网保活", "断网时段结束，恢复网络巡检。", success=True)
+        self._cut_active_last = cut
         self._tick_network_keep_alive(now)
+
+    def _night_cut_active(self, now: datetime, cfg: NetworkLoginConfig) -> bool:
+        if cfg.smart_night_cut:
+            return self.night_cut.is_cut_at(now, self.holidays.is_workday)
+        return bool(cfg.night_mode and KeepAlivePolicy._is_night_window(now))
+
+    def _rebuild_schedule(self) -> None:
+        cfg = self.settings.get_network_login_config()
+        self.night_cut = NightCutSchedule(
+            str(cfg.get("cut_start_time", "23:30")), str(cfg.get("cut_end_time", "07:00"))
+        )
+
+    def tonight_cut_text(self) -> str:
+        """今晚是否会断网的说明，供主菜单展示。"""
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        if not self.night_cut.cuts_on(today, self.holidays.is_workday):
+            return f"今晚不断网（明日 {tomorrow:%m-%d} {self.holidays.workday_label(tomorrow)}），保活全天可用。"
+        start, end = self.night_cut.window_of(today)
+        return (
+            f"今晚 {start:%H:%M} 至次日 {end:%H:%M} 按学校安排断网"
+            f"（明日 {tomorrow:%m-%d} {self.holidays.workday_label(tomorrow)}），该时段保活自动暂停。"
+        )
 
     def _on_windows_session_restored(self, source: str) -> None:
         if not self.settings.is_network_enabled():
@@ -504,6 +546,8 @@ class ReminderApp:
 
         cfg = self._network_config()
         if not cfg.enabled or not cfg.has_credentials():
+            return
+        if self._night_cut_active(now, cfg):
             return
         if self.network_future is not None:
             self.pending_session_relogin = True
@@ -570,7 +614,7 @@ class ReminderApp:
             if result.ok:
                 self.keep_alive_policy.on_success()
             else:
-                self.keep_alive_policy.on_failure(self._network_config().night_mode, datetime.now())
+                self.keep_alive_policy.on_failure(datetime.now())
 
         self._refresh_status_labels()
 
@@ -597,14 +641,8 @@ class ReminderApp:
             return
         self.last_keep_alive_check_at = now
 
-        if cfg.suspend_on_holiday and self.holidays.keep_alive_break_day(now.date(), include_weekend=False):
-            text = "校园网: 节假日智能暂停保活"
-            if text != self._last_network_status_text:
-                self.network_status_action.setText(text)
-                self._last_network_status_text = text
-            return
-
-        can_attempt, reason = self.keep_alive_policy.can_attempt(cfg.night_mode, now)
+        cut_active = self._night_cut_active(now, cfg)
+        can_attempt, reason = self.keep_alive_policy.can_attempt(cut_active, now)
         if not can_attempt:
             if reason:
                 text = f"校园网: {reason}"

@@ -6,8 +6,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time
-from typing import Any
+from datetime import date, datetime, time as dt_time, timedelta
+from typing import Any, Callable
 
 
 EPORTAL_LOGIN_URL_BASE = "http://10.2.5.251:801/eportal/"
@@ -33,7 +33,9 @@ class NetworkLoginConfig:
     wifi_ssid: str
     night_mode: bool
     probe_interval_seconds: int
-    suspend_on_holiday: bool = True
+    smart_night_cut: bool = True
+    cut_start_time: str = "23:30"
+    cut_end_time: str = "07:00"
 
     def has_credentials(self) -> bool:
         return bool(self.username.strip() and self.password)
@@ -154,55 +156,90 @@ class NetworkLoginService:
             return False
 
 
+class NightCutSchedule:
+    """校园网夜间断网窗口。
+
+    CUMT 规则：断网发生在"上课日的前一天夜间"，即 [D 23:30, D+1 07:00]
+    当且仅当 D+1 需要上课。因此周日到周四夜间断网，周五、周六夜间不断网；
+    法定节假日（含调休放假）期间其前一晚不断网，而假期结束后的第一个上课日
+    前夜恢复断网。
+    """
+
+    DEFAULT_START = dt_time(23, 30)
+    DEFAULT_END = dt_time(7, 0)
+
+    def __init__(self, start: str = "23:30", end: str = "07:00") -> None:
+        self.start = self.parse(start, self.DEFAULT_START)
+        self.end = self.parse(end, self.DEFAULT_END)
+
+    @staticmethod
+    def parse(value: str, default: dt_time) -> dt_time:
+        try:
+            hour, minute = str(value).split(":")
+            parsed = dt_time(int(hour), int(minute))
+        except Exception:
+            return default
+        return parsed
+
+    def window_of(self, day: date) -> tuple[datetime, datetime]:
+        """返回以 day 为起始日的断网窗口 [day start, day+1 end]。"""
+        return datetime.combine(day, self.start), datetime.combine(day + timedelta(days=1), self.end)
+
+    def cuts_on(self, day: date, is_workday: Callable[[date], bool]) -> bool:
+        """day 当晚是否会断网（取决于次日是否上课）。"""
+        return bool(is_workday(day + timedelta(days=1)))
+
+    def is_cut_at(self, moment: datetime, is_workday: Callable[[date], bool]) -> bool:
+        """给定时刻是否处于断网时段内。"""
+        current = moment.time()
+        if current >= self.start:
+            return self.cuts_on(moment.date(), is_workday)
+        if current < self.end:
+            return self.cuts_on(moment.date() - timedelta(days=1), is_workday)
+        return False
+
+    def current_window(self, moment: datetime) -> tuple[datetime, datetime]:
+        """包含 moment 的断网窗口（若 moment 在 00:00–end 之间，窗口起始于前一天）。"""
+        day = moment.date() if moment.time() >= self.start else moment.date() - timedelta(days=1)
+        return self.window_of(day)
+
+    def next_window_start(self, moment: datetime, is_workday: Callable[[date], bool]) -> datetime | None:
+        """下一个真正会断网的夜晚的起始时刻。"""
+        day = moment.date()
+        for offset in range(0, 15):
+            candidate = day + timedelta(days=offset)
+            start, _ = self.window_of(candidate)
+            if start > moment and self.cuts_on(candidate, is_workday):
+                return start
+        return None
+
+
 class KeepAlivePolicy:
-    NIGHT_RECOVERY_HOUR = 7
+    """保活重试策略：断网时段不打扰，失败按指数退避重试。"""
 
     def __init__(self) -> None:
         self.consecutive_failures = 0
         self.next_retry_at = 0.0
-        self.night_failures: list[float] = []
-        self.night_suspended = False
 
-    def resume_daytime_recovery_if_due(self, now: datetime | None = None) -> bool:
-        current_time = now or datetime.now()
-        if not self.night_suspended or current_time.hour < self.NIGHT_RECOVERY_HOUR:
-            return False
-        self.night_suspended = False
-        self.night_failures = []
-        self.next_retry_at = 0.0
-        self.consecutive_failures = 0
-        return True
-
-    def can_attempt(self, night_mode: bool, now: datetime | None = None) -> tuple[bool, str]:
-        current_time = now or datetime.now()
-        now = time.time()
-        self.resume_daytime_recovery_if_due(current_time)
-        if night_mode:
-            if self.night_suspended:
-                return False, f"夜间省电暂停中，{self.NIGHT_RECOVERY_HOUR:02d}:00 后自动恢复。"
-            if self._is_night_window(current_time):
-                self.night_failures = [t for t in self.night_failures if now - t <= 60]
-                if len(self.night_failures) >= 3:
-                    self.night_suspended = True
-                    return False, f"夜间重连失败较多，已暂停到 {self.NIGHT_RECOVERY_HOUR:02d}:00。"
-
-        if now < self.next_retry_at:
-            return False, f"重试退避中，约 {int(self.next_retry_at - now)} 秒后再试。"
+    def can_attempt(self, cut_active: bool, now: datetime | None = None) -> tuple[bool, str]:
+        current_ts = time.time()
+        if cut_active:
+            return False, "处于学校安排的夜间断网时段"
+        if current_ts < self.next_retry_at:
+            return False, f"重试退避中，约 {int(self.next_retry_at - current_ts)} 秒后再试。"
         return True, ""
 
     def on_success(self) -> None:
         self.consecutive_failures = 0
         self.next_retry_at = 0.0
-        self.night_failures = []
 
-    def on_failure(self, night_mode: bool, now: datetime | None = None) -> None:
+    def on_failure(self, now: datetime | None = None) -> None:
         self.consecutive_failures += 1
         backoff = min(60, 2 ** min(self.consecutive_failures, 6))
         self.next_retry_at = time.time() + backoff
-        if night_mode and self._is_night_window(now or datetime.now()):
-            self.night_failures.append(time.time())
 
     @staticmethod
     def _is_night_window(now: datetime) -> bool:
+        """固定夜间窗口（不参考节假日），供未启用智能判断时使用。"""
         current_time = now.time()
-        return current_time >= dt_time(23, 30) or current_time < dt_time(KeepAlivePolicy.NIGHT_RECOVERY_HOUR, 0)
+        return current_time >= NightCutSchedule.DEFAULT_START or current_time < NightCutSchedule.DEFAULT_END

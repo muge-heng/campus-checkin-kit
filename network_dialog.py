@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QTimeEdit,
     QVBoxLayout,
 )
 
@@ -85,9 +86,27 @@ class NetworkLoginDialog(QDialog):
         self.night_mode_box.setChecked(config.night_mode)
         form.addRow("", self.night_mode_box)
 
-        self.holiday_box = QCheckBox("节假日/寒暑假智能暂停保活（自动拉取法定节假日）")
-        self.holiday_box.setChecked(config.suspend_on_holiday)
-        form.addRow("", self.holiday_box)
+        self.smart_cut_box = QCheckBox("智能判断夜间断网：明日需要上课时，今晚到明早处于断网时段则暂停保活")
+        self.smart_cut_box.setChecked(config.smart_night_cut)
+        self.smart_cut_box.setToolTip(
+            "CUMT 规则：断网发生在上课日的前一夜。启用后自动结合法定节假日与调休判断，"
+            "只在真会断网的时段暂停保活；周五、周六夜间以及假期前夜照常保活。"
+        )
+        form.addRow("", self.smart_cut_box)
+
+        time_row = QHBoxLayout()
+        self.cut_start_edit = QTimeEdit()
+        self.cut_start_edit.setDisplayFormat("HH:mm")
+        self.cut_start_edit.setTime(QTime.fromString(config.cut_start_time, "HH:mm"))
+        self.cut_end_edit = QTimeEdit()
+        self.cut_end_edit.setDisplayFormat("HH:mm")
+        self.cut_end_edit.setTime(QTime.fromString(config.cut_end_time, "HH:mm"))
+        time_row.addWidget(QLabel("断网开始"))
+        time_row.addWidget(self.cut_start_edit)
+        time_row.addWidget(QLabel("恢复"))
+        time_row.addWidget(self.cut_end_edit)
+        time_row.addStretch()
+        form.addRow("断网时段", time_row)
 
         root.addLayout(form)
 
@@ -114,7 +133,7 @@ class NetworkLoginDialog(QDialog):
         recovery_layout.setContentsMargins(12, 9, 12, 9)
         recovery_title = QLabel("快速恢复已启用")
         recovery_title.setStyleSheet("font-weight: 700; color: #17663e;")
-        recovery_hint = QLabel("Windows 解锁或回到桌面后，会立即尝试校园网登录；夜间暂停会在 07:00 自动解除。")
+        recovery_hint = QLabel("Windows 解锁或回到桌面后会立即尝试登录；智能判断启用后，只在真会断网的夜间暂停保活，断网时段结束自动恢复巡检。")
         recovery_hint.setWordWrap(True)
         recovery_hint.setStyleSheet("font-size: 12px; color: #31684b;")
         recovery_layout.addWidget(recovery_title)
@@ -151,7 +170,9 @@ class NetworkLoginDialog(QDialog):
             wifi_ssid=self.wifi_edit.text().strip() or "CUMT_Stu",
             night_mode=self.night_mode_box.isChecked(),
             probe_interval_seconds=self.probe_interval_spin.value(),
-            suspend_on_holiday=self.holiday_box.isChecked(),
+            smart_night_cut=self.smart_cut_box.isChecked(),
+            cut_start_time=self.cut_start_edit.time().toString("HH:mm"),
+            cut_end_time=self.cut_end_edit.time().toString("HH:mm"),
         )
 
     def set_busy(self, busy: bool, text: str) -> None:

@@ -33,7 +33,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "network_wifi_ssid": "CUMT_Stu",
     "network_night_mode": True,
     "network_probe_interval_seconds": 15,
-    "network_suspend_on_holiday": True,
+    "network_smart_night_cut": True,
+    "network_cut_start_time": "23:30",
+    "network_cut_end_time": "07:00",
     "last_network_login_at": "",
     "last_network_login_status": "",
     # 通知配置 - 支持 system(系统推送)、toast(简洁通知)、none(关闭通知)
@@ -200,7 +202,9 @@ class SettingsStore:
             "wifi_ssid": str(self._settings.get("network_wifi_ssid", DEFAULT_SETTINGS["network_wifi_ssid"])),
             "night_mode": bool(self._settings.get("network_night_mode", True)),
             "probe_interval_seconds": self.get_network_probe_interval_seconds(),
-            "suspend_on_holiday": bool(self._settings.get("network_suspend_on_holiday", True)),
+            "smart_night_cut": bool(self._settings.get("network_smart_night_cut", True)),
+            "cut_start_time": str(self._settings.get("network_cut_start_time", "23:30")),
+            "cut_end_time": str(self._settings.get("network_cut_end_time", "07:00")),
         }
 
     def set_network_login_config(self, config: Dict[str, Any]) -> None:
@@ -216,7 +220,9 @@ class SettingsStore:
         self._settings["network_probe_interval_seconds"] = self._normalize_network_probe_interval(
             config.get("probe_interval_seconds", DEFAULT_SETTINGS["network_probe_interval_seconds"])
         )
-        self._settings["network_suspend_on_holiday"] = bool(config.get("suspend_on_holiday", True))
+        self._settings["network_smart_night_cut"] = bool(config.get("smart_night_cut", True))
+        self._settings["network_cut_start_time"] = str(config.get("cut_start_time", "23:30"))
+        self._settings["network_cut_end_time"] = str(config.get("cut_end_time", "07:00"))
         self.save()
 
     def get_network_probe_interval_seconds(self) -> int:

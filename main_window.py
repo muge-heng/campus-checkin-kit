@@ -2,7 +2,7 @@
 
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTime, QUrl
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTabWidget,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -290,11 +291,27 @@ class MainWindow(QWidget):
         self.auto_login_box = QCheckBox("程序启动后自动尝试登录")
         self.keep_alive_box = QCheckBox("断网后自动检测并重连")
         self.auto_wifi_box = QCheckBox("重连前先尝试连接指定 Wi-Fi")
-        self.night_mode_box = QCheckBox("夜间失败过多时暂停重连（07:00 自动恢复）")
-        self.holiday_suspend_box = QCheckBox("节假日智能暂停保活（自动拉取法定节假日与寒暑假暂停区间）")
+        self.night_mode_box = QCheckBox("夜间失败过多时暂停重连（防重试风暴）")
+        self.smart_cut_box = QCheckBox("智能判断夜间断网：明日上课则今晚的断网时段暂停保活")
         for box_widget in (self.auto_login_box, self.keep_alive_box, self.auto_wifi_box,
-                           self.night_mode_box, self.holiday_suspend_box):
+                           self.night_mode_box, self.smart_cut_box):
             form.addRow("", box_widget)
+
+        cut_row = QHBoxLayout()
+        self.cut_start_edit = QTimeEdit()
+        self.cut_start_edit.setDisplayFormat("HH:mm")
+        self.cut_end_edit = QTimeEdit()
+        self.cut_end_edit.setDisplayFormat("HH:mm")
+        cut_row.addWidget(QLabel("断网开始"))
+        cut_row.addWidget(self.cut_start_edit)
+        cut_row.addWidget(QLabel("恢复时刻"))
+        cut_row.addWidget(self.cut_end_edit)
+        cut_row.addStretch()
+        form.addRow("断网时段", cut_row)
+        self.tonight_label = QLabel("今晚断网预判：-")
+        self.tonight_label.setWordWrap(True)
+        self.tonight_label.setStyleSheet("font-size: 12px; color: #17663e;")
+        form.addRow("", self.tonight_label)
 
         self.probe_spin = QSpinBox()
         self.probe_spin.setRange(10, 60)
@@ -322,10 +339,16 @@ class MainWindow(QWidget):
         layout.addWidget(box)
 
         layout.addWidget(self._note(
-            "登录门户默认对接 CUMT ePortal（http://10.2.5.251:801/eportal/）。"
-            "其他学校如需使用自动登录，可在 campus_network.py 中修改 EPORTAL_LOGIN_URL_BASE 与参数；"
-            "提醒功能则完全通用。",
+            "夜间断网规则：CUMT 在上课日的前一夜断网（默认 23:30 至次日 07:00），"
+            "因此周日到周四夜间会断、周五周六夜间不断；法定节假日与寒暑假期间其前一夜不断网，"
+            "假期结束后的第一个上课日前夜恢复断网。程序据此只在真会断网的时段暂停保活，其余时间照常守护。",
             "netNote",
+        ))
+        layout.addWidget(self._note(
+            "登录门户默认对接 CUMT ePortal（http://10.2.5.251:801/eportal/）。"
+            "其他学校如需使用自动登录，可在 campus_network.py 中修改 EPORTAL_LOGIN_URL_BASE 与参数，"
+            "并在此处填上贵校自己的断网时段；提醒功能则完全通用。",
+            "netNote2",
         ))
         layout.addStretch()
         return page
@@ -342,7 +365,9 @@ class MainWindow(QWidget):
             wifi_ssid=self.wifi_edit.text().strip() or "CUMT_Stu",
             night_mode=self.night_mode_box.isChecked(),
             probe_interval_seconds=self.probe_spin.value(),
-            suspend_on_holiday=self.holiday_suspend_box.isChecked(),
+            smart_night_cut=self.smart_cut_box.isChecked(),
+            cut_start_time=self.cut_start_edit.time().toString("HH:mm"),
+            cut_end_time=self.cut_end_edit.time().toString("HH:mm"),
         )
         self.settings.set_network_login_config(cfg.__dict__)
         self.ctx.on_network_config_saved()
@@ -472,11 +497,16 @@ class MainWindow(QWidget):
 
         box, box_layout = self._group("法定节假日数据")
         self.holiday_today = QLabel("今天：-")
+        self.holiday_tomorrow = QLabel("明天：-")
+        self.holiday_cut = QLabel("今晚断网预判：-")
         self.holiday_status = QLabel("-")
-        self.holiday_today.setStyleSheet("font-size: 14px; font-weight: 600;")
+        for widget in (self.holiday_today, self.holiday_tomorrow, self.holiday_cut):
+            widget.setStyleSheet("font-size: 14px; font-weight: 600;")
         self.holiday_status.setWordWrap(True)
         self.holiday_status.setStyleSheet("font-size: 12px; color: #555;")
         box_layout.addWidget(self.holiday_today)
+        box_layout.addWidget(self.holiday_tomorrow)
+        box_layout.addWidget(self.holiday_cut)
         box_layout.addWidget(self.holiday_status)
         row = QHBoxLayout()
         refresh = QPushButton("拉取/刷新今年数据")
@@ -486,7 +516,8 @@ class MainWindow(QWidget):
         box_layout.addLayout(row)
         box_layout.addWidget(self._note(
             "数据来自公共节假日 API（timor.tech），含调休补班安排，缓存于本地配置目录；"
-            "断网时自动回退为“按周末推断”。节假日影响：可跳过当日签到提醒、智能暂停校园网保活。",
+            "断网时自动回退为“按周末推断”。用途：判断明日是否上课，从而推算今晚校园网会不会断，"
+            "以及可选地在节假日跳过签到提醒。",
             "holidayNoteTab",
         ))
         layout.addWidget(box)
@@ -499,7 +530,13 @@ class MainWindow(QWidget):
 
     def _reload_holiday_tab(self) -> None:
         today = date.today()
+        tomorrow = today + timedelta(days=1)
         self.holiday_today.setText(self.holidays.describe(today))
+        self.holiday_tomorrow.setText(
+            f"明天：{tomorrow.isoformat()} {self.holidays.workday_label(tomorrow)}"
+            f"（{'今晚校园网会断' if self.holidays.is_workday(tomorrow) else '今晚校园网不断'}）"
+        )
+        self.holiday_cut.setText("今晚断网预判：" + self.ctx.tonight_cut_text())
         self.holiday_status.setText(self.holidays.status_text())
 
     # ---------- 关于 ----------
@@ -558,7 +595,10 @@ class MainWindow(QWidget):
         self.keep_alive_box.setChecked(cfg["keep_alive"])
         self.auto_wifi_box.setChecked(cfg["auto_wifi"])
         self.night_mode_box.setChecked(cfg["night_mode"])
-        self.holiday_suspend_box.setChecked(cfg.get("suspend_on_holiday", True))
+        self.smart_cut_box.setChecked(bool(cfg.get("smart_night_cut", True)))
+        self.cut_start_edit.setTime(QTime.fromString(str(cfg.get("cut_start_time", "23:30")), "HH:mm"))
+        self.cut_end_edit.setTime(QTime.fromString(str(cfg.get("cut_end_time", "07:00")), "HH:mm"))
+        self.tonight_label.setText("今晚断网预判：" + self.ctx.tonight_cut_text())
         self.probe_spin.setValue(cfg["probe_interval_seconds"])
 
         notify = self.settings.get_notification_config()
