@@ -32,7 +32,7 @@ from campus_network import ISP_DISPLAY_LIST, NetworkLoginConfig
 from holiday_service import HolidayService
 from settings_store import SettingsStore
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 GITHUB_URL = "https://github.com/muge-heng/campus-checkin-kit"
 
 

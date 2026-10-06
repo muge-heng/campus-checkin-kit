@@ -1,6 +1,5 @@
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -743,21 +742,24 @@ class ReminderApp:
 
         desktop = Path.home() / "Desktop"
         lnk_path = desktop / "校园提醒与校园网助手.lnk"
+        icon_source = str(target) if getattr(sys, "frozen", False) else str(resource_path(ICON_RELATIVE_PATH))
+        quoted = lambda text: str(text).replace("'", "''")
+        # 单行 -Command：不落盘 .ps1，也不使用 -ExecutionPolicy Bypass，
+        # 避免"写入脚本并绕过策略执行"这一最容易被杀软判为投放器的行为特征。
         ps = (
-            "$ws = New-Object -ComObject WScript.Shell; "
-            f"$sc = $ws.CreateShortcut('{str(lnk_path).replace(chr(39), chr(39) * 2)}'); "
-            f"$sc.TargetPath = '{cmd_target.replace(chr(39), chr(39) * 2)}'; "
-            f"$sc.Arguments = '{arguments.replace(chr(39), chr(39) * 2)}'; "
-            f"$sc.WorkingDirectory = '{working.replace(chr(39), chr(39) * 2)}'; "
-            "$sc.Description = '校园提醒与校园网助手'; "
-            f"$sc.IconLocation = '{str(resource_path(ICON_RELATIVE_PATH)).replace(chr(39), chr(39) * 2)}'; "
-            "$sc.Save()"
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');"
+            "$s.TargetPath='{}';$s.Arguments='{}';$s.WorkingDirectory='{}';"
+            "$s.Description='校园提醒与校园网助手';$s.IconLocation='{}';$s.Save()"
+        ).format(
+            quoted(lnk_path),
+            quoted(cmd_target),
+            quoted(arguments),
+            quoted(working),
+            quoted(icon_source),
         )
         try:
-            tmp = Path(tempfile.mkstemp(suffix=".ps1")[1])
-            tmp.write_text(ps, encoding="utf-8")
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(tmp)],
+                ["powershell", "-NoProfile", "-Command", ps],
                 capture_output=True,
                 text=True,
                 timeout=20,
